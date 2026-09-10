@@ -1,10 +1,24 @@
-/* AniKoto provider for Nuvio */
+/* AniKoto provider for Nuvio
+ *
+ * AniKotoAPI v2.4.x flow:
+ * search
+ * -> episodes
+ * -> decode server_ids
+ * -> servers
+ * -> stream
+ * -> stream/resolve
+ */
 
 var API = "https://anikototvapi.vercel.app/api";
 
 var USER_AGENT =
   "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 " +
-  "Chrome/131.0 Mobile Safari/537.36";
+  "(KHTML, like Gecko) Chrome/131.0 Mobile Safari/537.36";
+
+
+/* ---------------------------------------------------------
+ * HTTP
+ * --------------------------------------------------------- */
 
 function fetchJson(url) {
   return fetch(url, {
@@ -13,17 +27,87 @@ function fetchJson(url) {
       "User-Agent": USER_AGENT,
       "Accept": "application/json"
     }
-  }).then(function (r) {
-    if (!r.ok) {
-      throw new Error("HTTP " + r.status);
+  }).then(function (response) {
+    if (!response.ok) {
+      throw new Error(
+        "HTTP " + response.status + " from " + url
+      );
     }
 
-    return r.json();
+    return response.json();
   });
 }
 
-function normalizeTitle(s) {
-  return String(s || "")
+
+/* ---------------------------------------------------------
+ * Base64 decoder
+ *
+ * server_ids returned by AniKotoAPI are base64 encoded.
+ * Avoid relying on atob() because Nuvio's JS runtime
+ * compatibility can vary.
+ * --------------------------------------------------------- */
+
+var BASE64_CHARS =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZ" +
+  "abcdefghijklmnopqrstuvwxyz" +
+  "0123456789+/";
+
+function decodeBase64(input) {
+  var str = String(input || "")
+    .replace(/[\r\n\s]/g, "")
+    .replace(/-/g, "+")
+    .replace(/_/g, "/");
+
+  while (str.length % 4 !== 0) {
+    str += "=";
+  }
+
+  var output = "";
+  var i = 0;
+
+  while (i < str.length) {
+    var c1 = BASE64_CHARS.indexOf(str.charAt(i++));
+    var c2 = BASE64_CHARS.indexOf(str.charAt(i++));
+    var c3 = BASE64_CHARS.indexOf(str.charAt(i++));
+    var c4 = BASE64_CHARS.indexOf(str.charAt(i++));
+
+    if (c1 < 0 || c2 < 0) {
+      break;
+    }
+
+    var n =
+      (c1 << 18) |
+      (c2 << 12) |
+      ((c3 < 0 ? 0 : c3) << 6) |
+      (c4 < 0 ? 0 : c4);
+
+    output += String.fromCharCode(
+      (n >> 16) & 255
+    );
+
+    if (c3 >= 0 && str.charAt(i - 2) !== "=") {
+      output += String.fromCharCode(
+        (n >> 8) & 255
+      );
+    }
+
+    if (c4 >= 0 && str.charAt(i - 1) !== "=") {
+      output += String.fromCharCode(
+        n & 255
+      );
+    }
+  }
+
+  return output;
+}
+
+
+/* ---------------------------------------------------------
+ * Title matching
+ * --------------------------------------------------------- */
+
+function normalizeTitle(value) {
+  return String(value || "")
     .toLowerCase()
     .replace(/[’']/g, "")
     .replace(/&/g, " and ")
@@ -36,8 +120,13 @@ function similarity(a, b) {
   var aa = normalizeTitle(a);
   var bb = normalizeTitle(b);
 
-  if (!aa || !bb) return 0;
-  if (aa === bb) return 1;
+  if (!aa || !bb) {
+    return 0;
+  }
+
+  if (aa === bb) {
+    return 1;
+  }
 
   if (
     aa.indexOf(bb) !== -1 ||
@@ -56,66 +145,85 @@ function similarity(a, b) {
     }
   }
 
-  return matches / Math.max(aw.length, bw.length);
+  return matches / Math.max(
+    aw.length,
+    bw.length
+  );
 }
+
+
+/* ---------------------------------------------------------
+ * Cinemeta metadata
+ * --------------------------------------------------------- */
 
 function getTitle(tmdbId) {
   return fetchJson(
     "https://v3-cinemeta.strem.io/meta/tv/tmdb:" +
     encodeURIComponent(String(tmdbId)) +
     ".json"
-  ).then(function (d) {
-    if (!d || !d.meta) {
-      throw new Error("Cinemeta metadata not found");
+  ).then(function (data) {
+    if (!data || !data.meta) {
+      throw new Error(
+        "Cinemeta metadata not found"
+      );
     }
 
     return (
-      d.meta.name ||
-      d.meta.title ||
-      d.meta.originalName ||
-      d.meta.original_title ||
+      data.meta.name ||
+      data.meta.title ||
+      data.meta.originalName ||
+      data.meta.original_title ||
       ""
     );
   });
 }
+
+
+/* ---------------------------------------------------------
+ * AniKoto search
+ * --------------------------------------------------------- */
 
 function searchAnime(title) {
   return fetchJson(
     API +
     "/search?keyword=" +
     encodeURIComponent(title)
-  ).then(function (d) {
-    if (!d) return [];
+  ).then(function (data) {
+    if (!data) {
+      return [];
+    }
 
-    if (Array.isArray(d)) return d;
-
-    if (
-      d.results &&
-      Array.isArray(d.results.data)
-    ) {
-      return d.results.data;
+    if (Array.isArray(data)) {
+      return data;
     }
 
     if (
-      d.results &&
-      Array.isArray(d.results.results)
+      data.results &&
+      Array.isArray(data.results.data)
     ) {
-      return d.results.results;
-    }
-
-    if (Array.isArray(d.results)) {
-      return d.results;
+      return data.results.data;
     }
 
     if (
-      d.data &&
-      Array.isArray(d.data.data)
+      data.results &&
+      Array.isArray(data.results.results)
     ) {
-      return d.data.data;
+      return data.results.results;
     }
 
-    if (Array.isArray(d.data)) {
-      return d.data;
+    if (Array.isArray(data.results)) {
+      return data.results;
+    }
+
+    if (
+      data.data &&
+      Array.isArray(data.data.data)
+    ) {
+      return data.data.data;
+    }
+
+    if (Array.isArray(data.data)) {
+      return data.data;
     }
 
     return [];
@@ -124,7 +232,7 @@ function searchAnime(title) {
 
 function findAnime(results, title) {
   var best = null;
-  var score = 0;
+  var bestScore = 0;
 
   for (var i = 0; i < results.length; i++) {
     var item = results[i];
@@ -134,12 +242,16 @@ function findAnime(results, title) {
       item.name ||
       item.anime_title ||
       item.japaneseTitle ||
+      item.japanese_title ||
       "";
 
-    var s = similarity(itemTitle, title);
+    var score = similarity(
+      itemTitle,
+      title
+    );
 
-    if (s > score) {
-      score = s;
+    if (score > bestScore) {
+      bestScore = score;
       best = item;
     }
   }
@@ -147,167 +259,419 @@ function findAnime(results, title) {
   return best;
 }
 
-function getAnimeKey(item) {
-  if (!item) return null;
+function getAnimeId(item) {
+  if (!item) {
+    return null;
+  }
 
   return (
     item.animeId ||
     item.anime_id ||
     item.id ||
-    item.slug ||
     null
   );
 }
+
+function getAnimeSlug(item) {
+  if (!item) {
+    return null;
+  }
+
+  return (
+    item.slug ||
+    item.anime_slug ||
+    item.animeSlug ||
+    null
+  );
+}
+
+
+/* ---------------------------------------------------------
+ * Episodes
+ * --------------------------------------------------------- */
 
 function getEpisodes(animeKey) {
   return fetchJson(
     API +
     "/episodes/" +
     encodeURIComponent(String(animeKey))
-  ).then(function (d) {
-    if (!d) return [];
+  ).then(function (data) {
+    if (!data) {
+      return {
+        episodes: [],
+        slug: null
+      };
+    }
 
-    if (Array.isArray(d)) return d;
-
-    if (
-      d.results &&
-      Array.isArray(d.results.episodes)
-    ) {
-      return d.results.episodes;
+    if (Array.isArray(data)) {
+      return {
+        episodes: data,
+        slug: null
+      };
     }
 
     if (
-      d.results &&
-      Array.isArray(d.results.data)
+      data.results &&
+      Array.isArray(data.results.episodes)
     ) {
-      return d.results.data;
-    }
-
-    if (Array.isArray(d.episodes)) {
-      return d.episodes;
-    }
-
-    if (Array.isArray(d.data)) {
-      return d.data;
+      return {
+        episodes: data.results.episodes,
+        slug: data.results.slug || null
+      };
     }
 
     if (
-      d.data &&
-      Array.isArray(d.data.episodes)
+      data.data &&
+      Array.isArray(data.data.episodes)
     ) {
-      return d.data.episodes;
+      return {
+        episodes: data.data.episodes,
+        slug: data.data.slug || null
+      };
     }
 
-    return [];
+    if (Array.isArray(data.episodes)) {
+      return {
+        episodes: data.episodes,
+        slug: data.slug || null
+      };
+    }
+
+    if (Array.isArray(data.data)) {
+      return {
+        episodes: data.data,
+        slug: data.slug || null
+      };
+    }
+
+    return {
+      episodes: [],
+      slug: null
+    };
   });
 }
 
-function findEpisode(episodes, number) {
+function findEpisode(episodes, episodeNumber) {
   for (var i = 0; i < episodes.length; i++) {
-    var ep = episodes[i];
+    var episode = episodes[i];
 
-    var n =
-      ep.episode_no ||
-      ep.episode ||
-      ep.number ||
-      ep.ep ||
-      ep.episode_number;
+    var number =
+      episode.episode_no ||
+      episode.episode ||
+      episode.number ||
+      episode.ep ||
+      episode.episode_number;
 
-    if (String(n) === String(number)) {
-      return ep;
+    if (
+      String(number) ===
+      String(episodeNumber)
+    ) {
+      return episode;
     }
   }
 
   if (
-    number >= 1 &&
-    number <= episodes.length
+    episodeNumber >= 1 &&
+    episodeNumber <= episodes.length
   ) {
-    return episodes[number - 1];
+    return episodes[
+      episodeNumber - 1
+    ];
   }
 
   return null;
 }
 
+
+/* ---------------------------------------------------------
+ * Servers
+ * --------------------------------------------------------- */
+
+function getDecodedServerIds(serverIds) {
+  if (!serverIds) {
+    return null;
+  }
+
+  var value = String(serverIds)
+    .replace(/^"+|"+$/g, "")
+    .trim();
+
+  /*
+   * v2.x documents server_ids as base64.
+   * If it already looks decoded, keep it.
+   */
+  if (
+    value.indexOf(":") !== -1 &&
+    /^[0-9:]+$/.test(value)
+  ) {
+    return value;
+  }
+
+  var decoded;
+
+  try {
+    decoded = decodeBase64(value);
+  } catch (error) {
+    decoded = "";
+  }
+
+  if (
+    decoded &&
+    decoded.indexOf(":") !== -1
+  ) {
+    return decoded;
+  }
+
+  /*
+   * Some deployments may already return
+   * a plain ID/list.
+   */
+  return value;
+}
+
 function getServers(serverIds) {
+  var ids = getDecodedServerIds(
+    serverIds
+  );
+
+  if (!ids) {
+    return Promise.resolve([]);
+  }
+
   return fetchJson(
     API +
     "/servers?ids=" +
-    encodeURIComponent(String(serverIds))
-  ).then(function (d) {
-    if (!d) return [];
+    encodeURIComponent(ids)
+  ).then(function (data) {
+    if (!data) {
+      return [];
+    }
 
-    if (Array.isArray(d)) return d;
-
-    if (
-      d.results &&
-      Array.isArray(d.results)
-    ) {
-      return d.results;
+    if (Array.isArray(data)) {
+      return data;
     }
 
     if (
-      d.data &&
-      Array.isArray(d.data)
+      data.results &&
+      Array.isArray(data.results)
     ) {
-      return d.data;
+      return data.results;
+    }
+
+    if (
+      data.data &&
+      Array.isArray(data.data)
+    ) {
+      return data.data;
     }
 
     return [];
   });
 }
 
-function getStream(linkId) {
+
+/* ---------------------------------------------------------
+ * Stream embed info
+ * --------------------------------------------------------- */
+
+function getStreamInfo(linkId) {
   return fetchJson(
     API +
     "/stream?id=" +
     encodeURIComponent(String(linkId))
-  ).then(function (d) {
-    if (!d) return null;
-
-    if (
-      d.results &&
-      d.results.url
-    ) {
-      return d.results;
+  ).then(function (data) {
+    if (!data) {
+      return null;
     }
 
     if (
-      d.result &&
-      d.result.url
+      data.results &&
+      data.results.url
     ) {
-      return d.result;
+      return data.results;
     }
 
     if (
-      d.data &&
-      d.data.url
+      data.result &&
+      data.result.url
     ) {
-      return d.data;
+      return data.result;
     }
 
-    if (d.url) {
-      return d;
+    if (
+      data.data &&
+      data.data.url
+    ) {
+      return data.data;
+    }
+
+    if (data.url) {
+      return data;
     }
 
     return null;
   });
 }
 
+
+/* ---------------------------------------------------------
+ * Resolve actual m3u8/mp4
+ * --------------------------------------------------------- */
+
+function resolveStream(linkId, slug) {
+  var url =
+    API +
+    "/stream/resolve?id=" +
+    encodeURIComponent(String(linkId));
+
+  if (slug) {
+    url +=
+      "&slug=" +
+      encodeURIComponent(String(slug));
+  }
+
+  return fetchJson(url)
+    .then(function (data) {
+      if (!data) {
+        return null;
+      }
+
+      if (
+        data.results &&
+        data.results.url
+      ) {
+        return data.results;
+      }
+
+      if (
+        data.result &&
+        data.result.url
+      ) {
+        return data.result;
+      }
+
+      if (
+        data.data &&
+        data.data.url
+      ) {
+        return data.data;
+      }
+
+      if (data.url) {
+        return data;
+      }
+
+      return null;
+    });
+}
+
+
+/* ---------------------------------------------------------
+ * Stream quality
+ * --------------------------------------------------------- */
+
+function detectFormat(url, type) {
+  if (
+    type &&
+    String(type).toLowerCase() === "hls"
+  ) {
+    return "m3u8";
+  }
+
+  if (
+    /\.m3u8([?#]|$)/i.test(
+      String(url || "")
+    )
+  ) {
+    return "m3u8";
+  }
+
+  return "mp4";
+}
+
+function extractQuality(stream) {
+  if (!stream) {
+    return "Auto";
+  }
+
+  if (stream.quality) {
+    return String(stream.quality);
+  }
+
+  if (stream.resolution) {
+    return String(stream.resolution);
+  }
+
+  if (
+    stream.height &&
+    !isNaN(parseInt(stream.height, 10))
+  ) {
+    return (
+      String(
+        parseInt(stream.height, 10)
+      ) +
+      "p"
+    );
+  }
+
+  return "Auto";
+}
+
+
+/* ---------------------------------------------------------
+ * Build Nuvio stream
+ * --------------------------------------------------------- */
+
 function makeStream(
-  stream,
-  serverName,
+  resolved,
+  server,
   episodeNumber
 ) {
-  if (!stream || !stream.url) {
+  if (
+    !resolved ||
+    !resolved.url
+  ) {
     return null;
   }
 
-  var url = String(stream.url);
+  var url = String(
+    resolved.url
+  );
 
-  var format =
-    /\.m3u8([?#]|$)/i.test(url)
-      ? "m3u8"
-      : "mp4";
+  var format = detectFormat(
+    url,
+    resolved.type
+  );
+
+  var serverName =
+    server &&
+    (
+      server.name ||
+      server.type
+    )
+      ? (
+          server.name ||
+          server.type
+        )
+      : "AniKoto";
+
+  var quality =
+    extractQuality(
+      resolved
+    );
+
+  /*
+   * If the resolver doesn't provide a
+   * quality, don't pretend the server name
+   * is a resolution.
+   */
+  if (
+    quality === "Auto" &&
+    server &&
+    server.name
+  ) {
+    quality = "Auto";
+  }
 
   return {
     name: "AniKoto",
@@ -316,12 +680,11 @@ function makeStream(
       "AniKoto • E" +
       String(episodeNumber) +
       " • " +
-      String(serverName || "Stream"),
+      String(serverName),
 
     url: url,
 
-    quality:
-      String(serverName || "Auto"),
+    quality: quality,
 
     format: format,
 
@@ -332,15 +695,29 @@ function makeStream(
   };
 }
 
+
+/* ---------------------------------------------------------
+ * Main Nuvio provider
+ * --------------------------------------------------------- */
+
 function getStreams(
   tmdbId,
   mediaType,
   season,
   episode
 ) {
+  if (!tmdbId) {
+    return Promise.resolve([]);
+  }
+
   if (
-    !tmdbId ||
-    mediaType === "movie" ||
+    mediaType &&
+    mediaType !== "tv"
+  ) {
+    return Promise.resolve([]);
+  }
+
+  if (
     episode === null ||
     episode === undefined
   ) {
@@ -348,7 +725,10 @@ function getStreams(
   }
 
   var episodeNumber =
-    parseInt(episode, 10);
+    parseInt(
+      episode,
+      10
+    );
 
   if (
     isNaN(episodeNumber) ||
@@ -359,15 +739,22 @@ function getStreams(
 
   var title;
   var anime;
-  var selected;
+  var episodeData;
+  var selectedEpisode;
+  var animeSlug;
 
   return getTitle(tmdbId)
 
-    .then(function (t) {
-      title = t;
-      return searchAnime(t);
+    /* Search */
+    .then(function (resolvedTitle) {
+      title = resolvedTitle;
+
+      return searchAnime(
+        resolvedTitle
+      );
     })
 
+    /* Select anime */
     .then(function (results) {
       anime = findAnime(
         results,
@@ -380,67 +767,164 @@ function getStreams(
         );
       }
 
+      animeSlug =
+        getAnimeSlug(anime);
+
+      var animeKey =
+        getAnimeId(anime) ||
+        animeSlug;
+
+      if (!animeKey) {
+        throw new Error(
+          "AniKoto anime ID/slug missing"
+        );
+      }
+
       return getEpisodes(
-        getAnimeKey(anime)
+        animeKey
       );
     })
 
-    .then(function (episodes) {
-      selected = findEpisode(
-        episodes,
-        episodeNumber
-      );
+    /* Select episode */
+    .then(function (data) {
+      episodeData = data;
 
-      if (!selected) {
+      /*
+       * Prefer slug returned by /episodes.
+       * Fall back to search result slug.
+       */
+      if (
+        data.slug &&
+        !animeSlug
+      ) {
+        animeSlug =
+          data.slug;
+      }
+
+      selectedEpisode =
+        findEpisode(
+          data.episodes,
+          episodeNumber
+        );
+
+      if (!selectedEpisode) {
         throw new Error(
           "Episode " +
-          episodeNumber +
+          String(episodeNumber) +
           " not found"
         );
       }
 
-      if (!selected.server_ids) {
+      if (
+        !selectedEpisode.server_ids
+      ) {
         throw new Error(
-          "AniKoto server_ids missing"
+          "Episode has no server_ids"
         );
       }
 
       return getServers(
-        selected.server_ids
+        selectedEpisode.server_ids
       );
     })
 
+    /* Select servers */
     .then(function (servers) {
       if (!servers.length) {
         throw new Error(
-          "AniKoto servers unavailable"
+          "No AniKoto servers available"
         );
       }
 
       var usable =
-        servers.filter(function (s) {
-          return s && s.link_id;
-        });
+        servers.filter(
+          function (server) {
+            return (
+              server &&
+              server.link_id
+            );
+          }
+        );
 
       if (!usable.length) {
         throw new Error(
-          "AniKoto link_id missing"
+          "No AniKoto link_id values"
         );
       }
 
+      /*
+       * Try every available server.
+       * Limit to 6 so a broken server cannot
+       * create excessive requests.
+       */
       return Promise.all(
         usable
-          .slice(0, 4)
+          .slice(0, 6)
           .map(function (server) {
-            return getStream(
+
+            return getStreamInfo(
               server.link_id
             )
-              .then(function (stream) {
-                return makeStream(
-                  stream,
-                  server.name,
-                  episodeNumber
-                );
+              .then(function (info) {
+
+                /*
+                 * The /stream endpoint returns
+                 * an embed URL. We primarily use
+                 * /stream/resolve for the actual
+                 * playable URL.
+                 */
+                return resolveStream(
+                  server.link_id,
+                  animeSlug
+                )
+                  .then(function (resolved) {
+
+                    /*
+                     * Resolver succeeded.
+                     */
+                    if (resolved) {
+                      return makeStream(
+                        resolved,
+                        server,
+                        episodeNumber
+                      );
+                    }
+
+                    /*
+                     * Rare fallback: if /stream
+                     * itself already returned a
+                     * playable URL, use it.
+                     */
+                    if (
+                      info &&
+                      info.url &&
+                      (
+                        /\.m3u8/i.test(
+                          String(info.url)
+                        ) ||
+                        /\.mp4/i.test(
+                          String(info.url)
+                        )
+                      )
+                    ) {
+                      return makeStream(
+                        {
+                          url: info.url,
+                          type:
+                            /\.m3u8/i.test(
+                              String(info.url)
+                            )
+                              ? "hls"
+                              : "mp4"
+                        },
+                        server,
+                        episodeNumber
+                      );
+                    }
+
+                    return null;
+                  });
+
               })
               .catch(function () {
                 return null;
@@ -449,14 +933,40 @@ function getStreams(
       );
     })
 
+    /* Remove failed servers */
     .then(function (streams) {
-      return streams.filter(
-        function (s) {
-          return !!s;
+      var output = [];
+      var seen = {};
+
+      for (
+        var i = 0;
+        i < streams.length;
+        i++
+      ) {
+        var stream = streams[i];
+
+        if (
+          !stream ||
+          !stream.url
+        ) {
+          continue;
         }
-      );
+
+        var key =
+          String(stream.url);
+
+        if (seen[key]) {
+          continue;
+        }
+
+        seen[key] = true;
+        output.push(stream);
+      }
+
+      return output;
     })
 
+    /* Never crash the Nuvio provider */
     .catch(function (error) {
       console.log(
         "[AniKoto] " +
@@ -466,6 +976,7 @@ function getStreams(
       return [];
     });
 }
+
 
 module.exports = {
   getStreams: getStreams
