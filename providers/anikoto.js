@@ -1,15 +1,10 @@
-/*
- * AniKoto provider for Nuvio
- * https://anikoto.cz
- *
- * Uses the public AniKotoAPI backend.
- */
+/* AniKoto provider for Nuvio */
 
 var API = "https://anikototvapi.vercel.app/api";
 
 var USER_AGENT =
   "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 " +
-  "(KHTML, like Gecko) Chrome/131.0 Mobile Safari/537.36";
+  "Chrome/131.0 Mobile Safari/537.36";
 
 function fetchJson(url) {
   return fetch(url, {
@@ -18,17 +13,17 @@ function fetchJson(url) {
       "User-Agent": USER_AGENT,
       "Accept": "application/json"
     }
-  }).then(function (response) {
-    if (!response.ok) {
-      throw new Error("HTTP " + response.status);
+  }).then(function (r) {
+    if (!r.ok) {
+      throw new Error("HTTP " + r.status);
     }
 
-    return response.json();
+    return r.json();
   });
 }
 
-function normalizeTitle(title) {
-  return String(title || "")
+function normalizeTitle(s) {
+  return String(s || "")
     .toLowerCase()
     .replace(/[’']/g, "")
     .replace(/&/g, " and ")
@@ -41,15 +36,13 @@ function similarity(a, b) {
   var aa = normalizeTitle(a);
   var bb = normalizeTitle(b);
 
-  if (!aa || !bb) {
-    return 0;
-  }
+  if (!aa || !bb) return 0;
+  if (aa === bb) return 1;
 
-  if (aa === bb) {
-    return 1;
-  }
-
-  if (aa.indexOf(bb) !== -1 || bb.indexOf(aa) !== -1) {
+  if (
+    aa.indexOf(bb) !== -1 ||
+    bb.indexOf(aa) !== -1
+  ) {
     return 0.9;
   }
 
@@ -66,76 +59,72 @@ function similarity(a, b) {
   return matches / Math.max(aw.length, bw.length);
 }
 
-/*
- * Get the title from Cinemeta.
- */
-function getTitle(tmdbId, mediaType) {
-  var type = mediaType === "movie" ? "movie" : "tv";
-
+function getTitle(tmdbId) {
   return fetchJson(
-    "https://v3-cinemeta.strem.io/meta/" +
-    type +
-    "/tmdb:" +
+    "https://v3-cinemeta.strem.io/meta/tv/tmdb:" +
     encodeURIComponent(String(tmdbId)) +
     ".json"
-  ).then(function (data) {
-    if (!data || !data.meta) {
+  ).then(function (d) {
+    if (!d || !d.meta) {
       throw new Error("Cinemeta metadata not found");
     }
 
     return (
-      data.meta.name ||
-      data.meta.title ||
-      data.meta.originalName ||
-      data.meta.original_title ||
+      d.meta.name ||
+      d.meta.title ||
+      d.meta.originalName ||
+      d.meta.original_title ||
       ""
     );
   });
 }
 
-/*
- * Search AniKoto.
- */
 function searchAnime(title) {
   return fetchJson(
     API +
     "/search?keyword=" +
     encodeURIComponent(title)
-  ).then(function (data) {
-    if (!data) {
-      return [];
+  ).then(function (d) {
+    if (!d) return [];
+
+    if (Array.isArray(d)) return d;
+
+    if (
+      d.results &&
+      Array.isArray(d.results.data)
+    ) {
+      return d.results.data;
     }
 
-    /*
-     * AniKotoAPI versions use different response
-     * wrappers, so support the common ones.
-     */
-    if (Array.isArray(data)) {
-      return data;
+    if (
+      d.results &&
+      Array.isArray(d.results.results)
+    ) {
+      return d.results.results;
     }
 
-    if (Array.isArray(data.data)) {
-      return data.data;
+    if (Array.isArray(d.results)) {
+      return d.results;
     }
 
-    if (data.data && Array.isArray(data.data.data)) {
-      return data.data.data;
+    if (
+      d.data &&
+      Array.isArray(d.data.data)
+    ) {
+      return d.data.data;
     }
 
-    if (Array.isArray(data.results)) {
-      return data.results;
+    if (Array.isArray(d.data)) {
+      return d.data;
     }
 
     return [];
   });
 }
 
-/*
- * Find the best AniKoto result.
- */
-function findBestResult(results, title) {
+function findAnime(results, title) {
   var best = null;
-  var bestScore = 0;
+  var score = 0;
 
   for (var i = 0; i < results.length; i++) {
     var item = results[i];
@@ -144,13 +133,13 @@ function findBestResult(results, title) {
       item.title ||
       item.name ||
       item.anime_title ||
-      item.jname ||
+      item.japaneseTitle ||
       "";
 
-    var score = similarity(itemTitle, title);
+    var s = similarity(itemTitle, title);
 
-    if (score > bestScore) {
-      bestScore = score;
+    if (s > score) {
+      score = s;
       best = item;
     }
   }
@@ -158,159 +147,183 @@ function findBestResult(results, title) {
   return best;
 }
 
-/*
- * Extract a slug/id from a search result.
- */
-function getAnimeId(item) {
-  if (!item) {
-    return null;
-  }
+function getAnimeKey(item) {
+  if (!item) return null;
 
   return (
-    item.id ||
-    item.anime_id ||
-    item.slug ||
     item.animeId ||
+    item.anime_id ||
+    item.id ||
+    item.slug ||
     null
   );
 }
 
-/*
- * Get episodes.
- */
-function getEpisodes(animeId) {
+function getEpisodes(animeKey) {
   return fetchJson(
     API +
     "/episodes/" +
-    encodeURIComponent(String(animeId))
-  ).then(function (data) {
-    if (!data) {
-      return [];
+    encodeURIComponent(String(animeKey))
+  ).then(function (d) {
+    if (!d) return [];
+
+    if (Array.isArray(d)) return d;
+
+    if (
+      d.results &&
+      Array.isArray(d.results.episodes)
+    ) {
+      return d.results.episodes;
     }
 
-    if (Array.isArray(data)) {
-      return data;
+    if (
+      d.results &&
+      Array.isArray(d.results.data)
+    ) {
+      return d.results.data;
     }
 
-    if (Array.isArray(data.data)) {
-      return data.data;
+    if (Array.isArray(d.episodes)) {
+      return d.episodes;
     }
 
-    if (data.data && Array.isArray(data.data.episodes)) {
-      return data.data.episodes;
+    if (Array.isArray(d.data)) {
+      return d.data;
     }
 
-    if (Array.isArray(data.episodes)) {
-      return data.episodes;
+    if (
+      d.data &&
+      Array.isArray(d.data.episodes)
+    ) {
+      return d.data.episodes;
     }
 
     return [];
   });
 }
 
-/*
- * Find the requested episode.
- */
-function findEpisode(episodes, episodeNumber) {
+function findEpisode(episodes, number) {
   for (var i = 0; i < episodes.length; i++) {
     var ep = episodes[i];
 
-    var number =
-      ep.number ||
+    var n =
+      ep.episode_no ||
       ep.episode ||
+      ep.number ||
       ep.ep ||
-      ep.episode_number ||
-      null;
+      ep.episode_number;
 
-    if (String(number) === String(episodeNumber)) {
+    if (String(n) === String(number)) {
       return ep;
     }
   }
 
-  /*
-   * Some API versions return the episode index
-   * as the array position.
-   */
   if (
-    episodeNumber >= 1 &&
-    episodeNumber <= episodes.length
+    number >= 1 &&
+    number <= episodes.length
   ) {
-    return episodes[episodeNumber - 1];
+    return episodes[number - 1];
   }
 
   return null;
 }
 
-/*
- * Get stream directly from AniKotoAPI.
- */
-function getStream(episode) {
-  var id =
-    episode.id ||
-    episode.episode_id ||
-    episode.ep_id ||
-    episode.link_id ||
-    episode.server_id ||
-    null;
+function getServers(serverIds) {
+  return fetchJson(
+    API +
+    "/servers?ids=" +
+    encodeURIComponent(String(serverIds))
+  ).then(function (d) {
+    if (!d) return [];
 
-  if (!id) {
-    return Promise.resolve(null);
-  }
+    if (Array.isArray(d)) return d;
 
+    if (
+      d.results &&
+      Array.isArray(d.results)
+    ) {
+      return d.results;
+    }
+
+    if (
+      d.data &&
+      Array.isArray(d.data)
+    ) {
+      return d.data;
+    }
+
+    return [];
+  });
+}
+
+function getStream(linkId) {
   return fetchJson(
     API +
     "/stream?id=" +
-    encodeURIComponent(String(id))
-  ).then(function (data) {
-    if (!data) {
-      return null;
+    encodeURIComponent(String(linkId))
+  ).then(function (d) {
+    if (!d) return null;
+
+    if (
+      d.results &&
+      d.results.url
+    ) {
+      return d.results;
     }
 
-    /*
-     * Handle common response formats.
-     */
-    if (data.url) {
-      return data;
+    if (
+      d.result &&
+      d.result.url
+    ) {
+      return d.result;
     }
 
-    if (data.data && data.data.url) {
-      return data.data;
+    if (
+      d.data &&
+      d.data.url
+    ) {
+      return d.data;
     }
 
-    if (data.result && data.result.url) {
-      return data.result;
+    if (d.url) {
+      return d;
     }
 
     return null;
   });
 }
 
-/*
- * Convert the API stream into a Nuvio stream.
- */
-function makeStream(stream, episodeNumber) {
+function makeStream(
+  stream,
+  serverName,
+  episodeNumber
+) {
   if (!stream || !stream.url) {
     return null;
   }
 
-  var quality =
-    stream.quality ||
-    stream.resolution ||
-    "Unknown";
+  var url = String(stream.url);
+
+  var format =
+    /\.m3u8([?#]|$)/i.test(url)
+      ? "m3u8"
+      : "mp4";
 
   return {
     name: "AniKoto",
 
     title:
-      "AniKoto • " +
-      "E" +
+      "AniKoto • E" +
       String(episodeNumber) +
       " • " +
-      String(quality),
+      String(serverName || "Stream"),
 
-    url: stream.url,
+    url: url,
 
-    quality: String(quality),
+    quality:
+      String(serverName || "Auto"),
+
+    format: format,
 
     headers: {
       "User-Agent": USER_AGENT,
@@ -319,34 +332,23 @@ function makeStream(stream, episodeNumber) {
   };
 }
 
-/*
- * Nuvio entry point.
- */
 function getStreams(
   tmdbId,
   mediaType,
   season,
   episode
 ) {
-  if (!tmdbId) {
-    return Promise.resolve([]);
-  }
-
-  if (mediaType === "movie") {
-    return Promise.resolve([]);
-  }
-
   if (
+    !tmdbId ||
+    mediaType === "movie" ||
     episode === null ||
     episode === undefined
   ) {
     return Promise.resolve([]);
   }
 
-  var episodeNumber = parseInt(
-    episode,
-    10
-  );
+  var episodeNumber =
+    parseInt(episode, 10);
 
   if (
     isNaN(episodeNumber) ||
@@ -356,49 +358,35 @@ function getStreams(
   }
 
   var title;
+  var anime;
+  var selected;
 
-  return getTitle(
-    tmdbId,
-    mediaType
-  )
-    .then(function (value) {
-      title = value;
+  return getTitle(tmdbId)
 
-      return searchAnime(title);
+    .then(function (t) {
+      title = t;
+      return searchAnime(t);
     })
-    .then(function (results) {
-      if (!results.length) {
-        throw new Error(
-          "AniKoto anime not found"
-        );
-      }
 
-      var anime = findBestResult(
+    .then(function (results) {
+      anime = findAnime(
         results,
         title
       );
 
       if (!anime) {
         throw new Error(
-          "No matching AniKoto anime"
-        );
-      }
-
-      var animeId =
-        getAnimeId(anime);
-
-      if (!animeId) {
-        throw new Error(
-          "AniKoto anime ID missing"
+          "AniKoto anime not found"
         );
       }
 
       return getEpisodes(
-        animeId
+        getAnimeKey(anime)
       );
     })
+
     .then(function (episodes) {
-      var selected = findEpisode(
+      selected = findEpisode(
         episodes,
         episodeNumber
       );
@@ -411,23 +399,64 @@ function getStreams(
         );
       }
 
-      return getStream(
-        selected
-      );
-    })
-    .then(function (stream) {
-      var result =
-        makeStream(
-          stream,
-          episodeNumber
+      if (!selected.server_ids) {
+        throw new Error(
+          "AniKoto server_ids missing"
         );
-
-      if (!result) {
-        return [];
       }
 
-      return [result];
+      return getServers(
+        selected.server_ids
+      );
     })
+
+    .then(function (servers) {
+      if (!servers.length) {
+        throw new Error(
+          "AniKoto servers unavailable"
+        );
+      }
+
+      var usable =
+        servers.filter(function (s) {
+          return s && s.link_id;
+        });
+
+      if (!usable.length) {
+        throw new Error(
+          "AniKoto link_id missing"
+        );
+      }
+
+      return Promise.all(
+        usable
+          .slice(0, 4)
+          .map(function (server) {
+            return getStream(
+              server.link_id
+            )
+              .then(function (stream) {
+                return makeStream(
+                  stream,
+                  server.name,
+                  episodeNumber
+                );
+              })
+              .catch(function () {
+                return null;
+              });
+          })
+      );
+    })
+
+    .then(function (streams) {
+      return streams.filter(
+        function (s) {
+          return !!s;
+        }
+      );
+    })
+
     .catch(function (error) {
       console.log(
         "[AniKoto] " +
